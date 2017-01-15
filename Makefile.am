@@ -45,13 +45,21 @@ moddir=$(prefix)/share/guile/site/2.2
 godir=$(libdir)/guile/2.2/ccache
 
 SOURCES =  \
-	8sync.scm \
-	8sync/agenda.scm \
-	8sync/repl.scm \
-	8sync/systems/irc.scm \
-	8sync/systems/web.scm \
-	8sync/actors.scm \
-	8sync/debug.scm
+	8sync.scm					\
+	8sync/agenda.scm				\
+	8sync/repl.scm					\
+	8sync/actors.scm				\
+	8sync/debug.scm					\
+	8sync/ports.scm					\
+	8sync/contrib/base64.scm			\
+	8sync/contrib/sha-1.scm				\
+	8sync/systems/irc.scm				\
+	8sync/systems/web.scm				\
+	8sync/systems/websocket.scm			\
+	8sync/systems/websocket/client.scm		\
+	8sync/systems/websocket/frame.scm		\
+	8sync/systems/websocket/server.scm		\
+	8sync/systems/websocket/utils.scm
 
 TESTS =							\
 	tests/test-agenda.scm				\
