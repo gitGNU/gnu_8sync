@@ -32,7 +32,15 @@
   #:use-module (web server)
   #:use-module (rnrs io ports)
   #:use-module (8sync)
-  #:export (<web-server>))
+  #:export (<web-server>
+            ;; @@: If we don't want to import these because of
+            ;;   "conflicts" with other objects, we could just
+            ;;   select <web-server> only.
+            ;;   Alternately we could move the crux of this into
+            ;;   another module and just export <web-server>, though
+            ;;   that does feel a bit like overkill.
+            .host .family .port-num .addr .socket
+            .upgrade-paths .http-handler))
 
 (define-actor <web-server> (<actor>)
   ((*init* web-server-socket-loop)
@@ -54,10 +62,14 @@
         #:accessor .addr)
   (socket #:init-value #f
           #:accessor .socket)
-  (upgrade #:init-value '()
-           #:allocation #:each-subclass)
+  (upgrade-paths #:init-value '()
+                 #:allocation #:each-subclass)
   (http-handler #:init-keyword #:http-handler
                 #:getter .http-handler))
+
+;; Define getter externally so it works even if we subclass
+(define-method (.upgrade-paths (web-server <web-server>))
+  (slot-ref web-server 'upgrade-paths))
 
 (define-method (initialize (web-server <web-server>) init-args)
   (next-method)
@@ -127,6 +139,23 @@ as we're alive."
               ((0) (memq 'keep-alive (response-connection response)))))
            (else #f)))))
 
+(define (maybe-upgrade-request web-server request body)
+  (define upgrade-paths (.upgrade-paths web-server))
+  ;; A request can specify multiple values to the "Upgrade"
+  ;; field, so we slook to see if we have an applicable option,
+  ;; in order.
+  ;; Note that we'll only handle one... we *don't* "compose"
+  ;; upgrades.
+  (let loop ((upgrades (request-upgrade request)))
+    (if (eq? upgrades '())
+        #f ; Shouldn't upgrade
+        (match (assoc (car upgrades) upgrade-paths)
+          ;; Yes, upgrade with this method
+          ((_ . upgrade-proc)
+           upgrade-proc)
+          ;; Keep looking...
+          (#f (loop (cdr upgrades)))))))
+
 (define (web-server-client-loop web-server message client)
   "Read request(s) from a client and pass off to the handler."
   (with-throw-handler #t
@@ -149,12 +178,22 @@ as we're alive."
             (lambda ()
               (let* ((request (read-request client))
                      (body (read-request-body request)))
-                (call-with-message
-                 ;; TODO: Add error handling in case we get an error
-                 ;;   response
-                 (<-wait (actor-id web-server) 'handle-request
-                         request body)
-                 respond-and-maybe-continue)))
+                (cond
+                 ;; Should we "upgrade" the protocol?
+                 ;; Doing so "breaks out" of this loop, possibly into a new one
+                 ((maybe-upgrade-request web-server request body) =>
+                  (lambda (upgrade)
+                    ;; TODO: this isn't great because we're in this catch,
+                    ;;   which doesn't make sense once we've "upgraded"
+                    ;;   since we might not "respond" in the same way anymore.
+                    (upgrade web-server client request body)))
+                 (else
+                  (call-with-message
+                   ;; TODO: Add error handling in case we get an error
+                   ;;   response
+                   (<-wait (actor-id web-server) 'handle-request
+                           request body)
+                   respond-and-maybe-continue)))))
             (lambda (key . args)
               (display "While reading request:\n" (current-error-port))
               (print-exception (current-error-port) #f key args)

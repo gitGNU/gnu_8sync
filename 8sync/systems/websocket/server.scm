@@ -36,7 +36,8 @@
   #:use-module (8sync systems web)
   #:use-module (8sync systems websocket frame)
   #:use-module (8sync systems websocket utils)
-  #:export (<websocket-server>))
+  #:export (<websocket-server>
+            .websocket-handler))
 
 ;; See section 4.2 for explanation of the handshake.
 (define (read-handshake-request client-socket)
@@ -56,12 +57,15 @@ string."
                                 (connection . (upgrade))
                                 (sec-websocket-accept . ,accept-key)))))
 
-(define-actor <websocket-server> (<web-server>)
-  ((new-client websocket-client-loop))
+(define-class <websocket-server> (<web-server>)
+  (upgrade-paths #:init-value `(("websocket" .
+                                 ,(wrap-apply websocket-client-loop)))
+                 #:allocation #:each-subclass
+                 #:accessor .upgrade-paths)
   (websocket-handler #:init-keyword #:websocket-handler
                      #:getter .websocket-handler))
 
-(define (websocket-client-loop websocket-server message client)
+(define (websocket-client-loop websocket-server client request body)
   "Serve client connected via CLIENT by performing the HTTP
 handshake and listening for control and data frames.  HANDLER is
 called for each complete message that is received."
@@ -77,7 +81,6 @@ called for each complete message that is received."
                        (make-binary-frame result))
                       ((not result)
                        #f))))
-
       (when response
         (write-frame response client))))
 
@@ -89,8 +92,7 @@ called for each complete message that is received."
   (setvbuf client 'none)
 
   ;; Perform the HTTP handshake and upgrade to WebSocket protocol.
-  (let* ((request (read-handshake-request client))
-         (client-key (assoc-ref (request-headers request) 'sec-websocket-key))
+  (let* ((client-key (assoc-ref (request-headers request) 'sec-websocket-key))
          (response (make-handshake-response client-key)))
     (write-response response client)
     (let loop ((fragments '())
