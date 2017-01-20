@@ -57,39 +57,61 @@ string."
                                 (connection . (upgrade))
                                 (sec-websocket-accept . ,accept-key)))))
 
-(define-class <websocket-server> (<web-server>)
+(define no-op (const #f))
+
+(define-actor <websocket-server> (<web-server>)
+  ((ws-send websocket-server-send))
   (upgrade-paths #:init-value `(("websocket" .
                                  ,(wrap-apply websocket-client-loop)))
                  #:allocation #:each-subclass
                  #:accessor .upgrade-paths)
-  (websocket-handler #:init-keyword #:websocket-handler
-                     #:getter .websocket-handler))
+
+  ;; active websocket connections
+  (ws-clients #:init-thunk make-hash-table
+              #:accessor .ws-clients)
+
+  (on-ws-message #:init-keyword #:on-ws-message 
+                 #:getter .on-ws-message)
+  (on-ws-client-connect #:init-keyword #:on-ws-client-connect
+                        #:init-value no-op
+                        #:getter .on-ws-client-connect)
+  (on-ws-client-disconnect #:init-keyword #:on-ws-client-disconnect
+                           #:init-value no-op
+                           #:getter .on-ws-client-disconnect))
 
 (define (websocket-client-loop websocket-server client request body)
   "Serve client connected via CLIENT by performing the HTTP
 handshake and listening for control and data frames.  HANDLER is
 called for each complete message that is received."
+  ;; TODO: We'll also want to handle stuff like the sub-protocol.
   (define (handle-data-frame type data)
-    (let* ((result   ((.websocket-handler websocket-server)
-                      (match type
-                        ('text   (utf8->string data))
-                        ('binary data))))
-           (response (cond
-                      ((string? result)
-                       (make-text-frame result))
-                      ((bytevector? result)
-                       (make-binary-frame result))
-                      ((not result)
-                       #f))))
-      (when response
-        (write-frame response client))))
+    ((.on-ws-message websocket-server)
+     websocket-server client-id
+     (match type
+       ('text   (utf8->string data))
+       ('binary data))))
 
   (define (read-frame-maybe)
     (and (not (eof-object? (lookahead-u8 client)))
          (read-frame client)))
 
+  ;; Allows other actors to send things to this specific client
+  ;; @@: We probably could just increment a counter...
+  (define client-id (big-random-number))
+
+  (define (close-down)
+    (close-port client)
+    (hash-remove! (.ws-clients websocket-server) client-id)
+    ((.on-ws-client-disconnect websocket-server)
+     websocket-server client-id))
+
+  (hash-set! (.ws-clients websocket-server) client-id client)
+
   ;; Disable buffering for websockets
   (setvbuf client 'none)
+
+  ((.on-ws-client-connect websocket-server)
+   websocket-server client-id)
 
   ;; Perform the HTTP handshake and upgrade to WebSocket protocol.
   (let* ((client-key (assoc-ref (request-headers request) 'sec-websocket-key))
@@ -101,7 +123,7 @@ called for each complete message that is received."
         (cond
          ;; EOF - port is closed.
          ((not frame)
-          (close-port client))
+          (close-down))
          ;; Per section 5.4, control frames may appear interspersed
          ;; along with a fragmented message.
          ((close-frame? frame)
@@ -110,7 +132,7 @@ called for each complete message that is received."
           ;; longer be listening.
           (false-if-exception
            (write-frame (make-close-frame (frame-data frame)) client))
-          (close-port client))
+          (close-down))
          ((ping-frame? frame)
           ;; Per section 5.5.3, a pong frame must include the exact
           ;; same data as the ping frame.
@@ -128,3 +150,19 @@ called for each complete message that is received."
          ((data-frame? frame) ; unfragmented data frame
           (handle-data-frame (frame-type frame) (frame-data frame))
           (loop '() #f)))))))
+
+(define (websocket-server-send websocket-server message client-id data)
+  (cond ((hash-ref (.ws-clients websocket-server) client-id) =>
+         (lambda (client)
+           (write-frame
+            (cond ((string? data)
+                   (make-text-frame data))
+                  ((bytevector? data)
+                   (make-binary-frame data)))
+            client)
+           ;; ok is like success, amirite
+           (<-reply message 'ok)))
+        (else
+         ;; No such client with that id.
+         ;; Either it closed, or it was never there.
+         (<-reply message 'client-gone))))
