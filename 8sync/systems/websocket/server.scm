@@ -59,12 +59,20 @@ string."
 
 (define no-op (const #f))
 
+(define (make-simple-counter)
+  (let ((count 0))
+    (lambda ()
+      (set! count (1+ count))
+      count)))
+
 (define-actor <websocket-server> (<web-server>)
   ((ws-send websocket-server-send))
   (upgrade-paths #:init-value `(("websocket" .
                                  ,(wrap-apply websocket-client-loop)))
                  #:allocation #:each-subclass
                  #:accessor .upgrade-paths)
+
+  (gen-client-id #:init-thunk make-simple-counter)
 
   ;; active websocket connections
   (ws-clients #:init-thunk make-hash-table
@@ -78,6 +86,9 @@ string."
   (on-ws-client-disconnect #:init-keyword #:on-ws-client-disconnect
                            #:init-value no-op
                            #:getter .on-ws-client-disconnect))
+
+(define (web-server-gen-client-id websocket-server)
+  ((slot-ref websocket-server 'gen-client-id)))
 
 (define (websocket-client-loop websocket-server client request body)
   "Serve client connected via CLIENT by performing the HTTP
@@ -97,7 +108,7 @@ called for each complete message that is received."
 
   ;; Allows other actors to send things to this specific client
   ;; @@: We probably could just increment a counter...
-  (define client-id (big-random-number))
+  (define client-id (web-server-gen-client-id websocket-server))
 
   (define (close-down)
     (close-port client)
